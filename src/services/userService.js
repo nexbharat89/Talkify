@@ -74,22 +74,50 @@ const updateProfile = async (req, res, next) => {
 
       uploadedImageKitFileId = uploadResponse.fileId;
       updates.avatarUrl = uploadResponse.url;
+      updates.avatarFileId = uploadResponse.fileId;
 
       // --- Delete old avatar from ImageKit if it exists ---
-      const currentUser = await User.findById(req.user.userId).select('avatarUrl').lean();
-      if (currentUser && currentUser.avatarUrl) {
+      // Delete by stored fileId (ImageKit searchQuery does not support `url`).
+      const currentUser = await User.findById(req.user.userId)
+        .select('avatarFileId')
+        .lean();
+      if (currentUser && currentUser.avatarFileId) {
         try {
-          const existingFiles = await imagekit.listFiles({
-            searchQuery: `url="${currentUser.avatarUrl}"`,
-          });
-          if (existingFiles && existingFiles.length > 0) {
-            await imagekit.deleteFile(existingFiles[0].fileId);
-          }
+          await imagekit.deleteFile(currentUser.avatarFileId);
         } catch (deleteErr) {
           // Non-critical: log and continue
           console.warn('[userService] Failed to delete old avatar:', deleteErr.message);
         }
       }
+    }
+
+    // --- Handle avatar removal (reset to default) ---
+    // Sent as form field `removeAvatar=true` when no new file is uploaded.
+    const removeAvatar =
+      req.body.removeAvatar === 'true' || req.body.removeAvatar === true;
+    if (!avatarFile && removeAvatar) {
+      const currentUser = await User.findById(req.user.userId)
+        .select('avatarFileId')
+        .lean();
+      // Best-effort delete of the ImageKit file by stored fileId. This must
+      // NOT block clearing the DB — otherwise an ImageKit error would leave
+      // the old avatarUrl in place and the picture would reappear on reload.
+      if (currentUser && currentUser.avatarFileId) {
+        const imagekit = getImageKit();
+        if (imagekit) {
+          try {
+            await imagekit.deleteFile(currentUser.avatarFileId);
+          } catch (deleteErr) {
+            // Non-critical: log and continue
+            console.warn(
+              '[userService] Failed to delete avatar on removal:',
+              deleteErr.message
+            );
+          }
+        }
+      }
+      updates.avatarUrl = '';
+      updates.avatarFileId = '';
     }
 
     if (Object.keys(updates).length === 0) {

@@ -24,6 +24,12 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    // ImageKit fileId for the current avatar, so we can delete it directly
+    // (ImageKit's listFiles searchQuery does NOT support a `url` field).
+    avatarFileId: {
+      type: String,
+      default: '',
+    },
     fcmTokens: [
       {
         token: { type: String, required: true },
