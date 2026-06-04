@@ -13,6 +13,13 @@ const { notifyNewMessage, notifyIncomingCall } = require('../services/pushServic
 const connectedUsers = new Map();
 
 /**
+ * Set of channelNames for calls the caller explicitly ended before the callee
+ * answered. When deliverPendingCalls runs on callee connect, these are skipped.
+ * Entries expires after 2 minutes (longer than the 90s re-delivery window).
+ */
+const cancelledCalls = new Set();
+
+/**
  * Map of socketId -> userId for reverse lookup.
  */
 const socketToUser = new Map();
@@ -670,6 +677,13 @@ const initSocketIO = (server) => {
         callLog.durationSeconds = durationSeconds;
         await callLog.save();
 
+        // Mark this channel as cancelled so deliverPendingCalls skips it.
+        if (callLog.channelName) {
+          cancelledCalls.add(callLog.channelName);
+          // Auto-expire after 2 minutes (the re-delivery window is 90s).
+          setTimeout(() => cancelledCalls.delete(callLog.channelName), 120000);
+        }
+
         const endedPayload = {
           callId: callLog._id,
           channelName: callLog.channelName,
@@ -795,27 +809,32 @@ const deliverPendingCalls = async (io, socket) => {
   try {
     const userId = socket.userId;
 
-    // Only re-deliver calls whose endedAt hasn't been overwritten by call:end
-    // or call:response (the schema default sets it at creation time, so
-    // endedAt ≈ createdAt means the call is still ringing).
-    const allCalls = await CallLog.find({
+    // Find the single most recent pending call for this user.
+    const calls = await CallLog.find({
       calleeId: userId,
       status: 'missed',
       isGroup: { $ne: true },
       createdAt: { $gt: new Date(Date.now() - 90 * 1000) },
     })
+      .sort({ createdAt: -1 })
+      .limit(1)
       .populate('callerId', 'name avatarUrl phone')
       .lean();
 
-    const pendingCalls = allCalls.filter((call) => {
-      const created = new Date(call.createdAt).getTime();
-      const ended = new Date(call.endedAt).getTime();
-      // endedAt was set at creation (default). If call:end or call:response
-      // overwrote it, endedAt will be much later than createdAt.
-      return Math.abs(ended - created) < 5000;
-    });
+    for (const call of calls) {
+      // Skip if the caller already ended this call (tracked via cancelledCalls).
+      if (cancelledCalls.has(call.channelName)) {
+        console.log(`[Socket] Skipping cancelled call ${call._id}`);
+        continue;
+      }
 
-    for (const call of pendingCalls) {
+      // Skip if the caller is no longer connected — their subscription expired.
+      const callerId = call.callerId._id?.toString() || call.callerId.toString();
+      if (!connectedUsers.has(callerId)) {
+        console.log(`[Socket] Skipping call ${call._id} — caller offline`);
+        continue;
+      }
+
       console.log(`[Socket] Re-delivering pending call ${call._id} to ${userId}`);
 
       const payload = {
