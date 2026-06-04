@@ -428,12 +428,31 @@ const initSocketIO = (server) => {
         };
 
         const targetSockets = connectedUsers.get(targetUserId);
+        let deliveredViaSocket = false;
         if (targetSockets && targetSockets.size > 0) {
           // Target is online - ring them via socket
+          deliveredViaSocket = true;
           for (const sockId of targetSockets) {
             io.to(sockId).emit('call:incoming', callPayload);
           }
         }
+
+        // If the receiver's device received the call via socket, tell the caller
+        // their phone is now ringing so the UI can switch from "Calling…" to
+        // "Ringing…". We don't emit this when the target is offline (push-only)
+        // because we have no confirmation the push has been processed.
+        if (deliveredViaSocket) {
+          const callerSockets = connectedUsers.get(userId);
+          if (callerSockets) {
+            for (const sockId of callerSockets) {
+              io.to(sockId).emit('call:ringing', {
+                callId: callLog._id,
+                channelName,
+              });
+            }
+          }
+        }
+
         // Always also send a push so a backgrounded/terminated app shows the
         // native incoming-call UI. The client de-dupes by callId.
         await notifyIncomingCall(
@@ -504,10 +523,12 @@ const initSocketIO = (server) => {
           (p) => p._id.toString() !== userId
         );
 
+        let anyDelivered = false;
         for (const member of others) {
           const memberId = member._id.toString();
           const memberSockets = connectedUsers.get(memberId);
           if (memberSockets && memberSockets.size > 0) {
+            anyDelivered = true;
             for (const sockId of memberSockets) {
               io.to(sockId).emit('call:incoming', callPayload);
             }
@@ -527,6 +548,19 @@ const initSocketIO = (server) => {
               groupName: chat.groupName || 'Group',
             }
           );
+        }
+
+        // Tell the caller the call is now ringing on at least one receiver.
+        if (anyDelivered) {
+          const initiatorSockets = connectedUsers.get(userId);
+          if (initiatorSockets) {
+            for (const sockId of initiatorSockets) {
+              io.to(sockId).emit('call:ringing', {
+                callId: callLog._id,
+                channelName,
+              });
+            }
+          }
         }
       } catch (err) {
         console.error('[Socket] call:group:initiate error:', err.message);
@@ -614,31 +648,51 @@ const initSocketIO = (server) => {
     // =======================================================================
     socket.on('call:end', async (data) => {
       try {
-        const { callId, durationSeconds = 0 } = data;
+        const { callId, channelName, durationSeconds = 0 } = data;
 
-        const callLog = await CallLog.findById(callId);
+        // The caller may end an outgoing call while it is still ringing, at
+        // which point it only knows the channelName (the callId is delivered
+        // back via call:response:ack only after the callee answers). Resolve
+        // by id when present, otherwise fall back to the channel.
+        let callLog = null;
+        if (callId) {
+          callLog = await CallLog.findById(callId);
+        } else if (channelName) {
+          callLog = await CallLog.findOne({ channelName }).sort({ createdAt: -1 });
+        }
         if (!callLog) {
           socket.emit('call:error', { error: 'Call not found' });
           return;
         }
 
+        // Stamp the end time. We deliberately do NOT touch `status`: an
+        // outgoing call that was never accepted stays 'missed', so the callee
+        // still gets a missed-call entry in their history.
         callLog.endedAt = new Date();
         callLog.durationSeconds = durationSeconds;
         await callLog.save();
 
-        // Notify the other peer
-        const otherUserId =
-          callLog.callerId.toString() === userId
-            ? callLog.calleeId.toString()
-            : callLog.callerId.toString();
+        const endedPayload = {
+          callId: callLog._id,
+          channelName: callLog.channelName,
+          durationSeconds,
+        };
 
-        const otherSockets = connectedUsers.get(otherUserId);
-        if (otherSockets) {
-          for (const sockId of otherSockets) {
-            io.to(sockId).emit('call:ended', {
-              callId: callLog._id,
-              durationSeconds,
-            });
+        // Notify BOTH parties so whichever side did not hang up tears down its
+        // UI — the ringing CallKit screen on the callee, or the active/ringing
+        // screen on either peer. Emitting to the ender too is harmless (their
+        // screen is already gone) and keeps multi-device sessions in sync.
+        const partyIds = [
+          callLog.callerId.toString(),
+          callLog.calleeId ? callLog.calleeId.toString() : null,
+        ].filter(Boolean);
+
+        for (const partyId of partyIds) {
+          const partySockets = connectedUsers.get(partyId);
+          if (partySockets) {
+            for (const sockId of partySockets) {
+              io.to(sockId).emit('call:ended', endedPayload);
+            }
           }
         }
       } catch (err) {
