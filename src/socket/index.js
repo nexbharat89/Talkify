@@ -516,10 +516,12 @@ const initSocketIO = (server) => {
           (p) => p._id.toString() !== userId
         );
 
+        let anyOnline = false;
         for (const member of others) {
           const memberId = member._id.toString();
           const memberSockets = connectedUsers.get(memberId);
           if (memberSockets && memberSockets.size > 0) {
+            anyOnline = true;
             for (const sockId of memberSockets) {
               io.to(sockId).emit('call:incoming', callPayload);
             }
@@ -539,6 +541,19 @@ const initSocketIO = (server) => {
               groupName: chat.groupName || 'Group',
             }
           );
+        }
+
+        // Tell the initiator the call is now ringing on at least one receiver.
+        if (anyOnline) {
+          const initiatorSockets = connectedUsers.get(userId);
+          if (initiatorSockets) {
+            for (const sockId of initiatorSockets) {
+              io.to(sockId).emit('call:ringing', {
+                callId: callLog._id,
+                channelName,
+              });
+            }
+          }
         }
       } catch (err) {
         console.error('[Socket] call:group:initiate error:', err.message);
