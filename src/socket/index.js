@@ -428,28 +428,10 @@ const initSocketIO = (server) => {
         };
 
         const targetSockets = connectedUsers.get(targetUserId);
-        let deliveredViaSocket = false;
         if (targetSockets && targetSockets.size > 0) {
           // Target is online - ring them via socket
-          deliveredViaSocket = true;
           for (const sockId of targetSockets) {
             io.to(sockId).emit('call:incoming', callPayload);
-          }
-        }
-
-        // If the receiver's device received the call via socket, tell the caller
-        // their phone is now ringing so the UI can switch from "Calling…" to
-        // "Ringing…". We don't emit this when the target is offline (push-only)
-        // because we have no confirmation the push has been processed.
-        if (deliveredViaSocket) {
-          const callerSockets = connectedUsers.get(userId);
-          if (callerSockets) {
-            for (const sockId of callerSockets) {
-              io.to(sockId).emit('call:ringing', {
-                callId: callLog._id,
-                channelName,
-              });
-            }
           }
         }
 
@@ -523,12 +505,10 @@ const initSocketIO = (server) => {
           (p) => p._id.toString() !== userId
         );
 
-        let anyDelivered = false;
         for (const member of others) {
           const memberId = member._id.toString();
           const memberSockets = connectedUsers.get(memberId);
           if (memberSockets && memberSockets.size > 0) {
-            anyDelivered = true;
             for (const sockId of memberSockets) {
               io.to(sockId).emit('call:incoming', callPayload);
             }
@@ -548,19 +528,6 @@ const initSocketIO = (server) => {
               groupName: chat.groupName || 'Group',
             }
           );
-        }
-
-        // Tell the caller the call is now ringing on at least one receiver.
-        if (anyDelivered) {
-          const initiatorSockets = connectedUsers.get(userId);
-          if (initiatorSockets) {
-            for (const sockId of initiatorSockets) {
-              io.to(sockId).emit('call:ringing', {
-                callId: callLog._id,
-                channelName,
-              });
-            }
-          }
         }
       } catch (err) {
         console.error('[Socket] call:group:initiate error:', err.message);
@@ -599,6 +566,32 @@ const initSocketIO = (server) => {
         await callLog.save();
       } catch (err) {
         console.error('[Socket] call:group:leave error:', err.message);
+      }
+    });
+
+    // =======================================================================
+    // Event: call:delivered
+    // Sent by the callee's app when it actually receives an incoming call
+    // notification (via socket). The server relays this as call:ringing to
+    // the caller so their UI can switch from "Calling…" to "Ringing…".
+    // =======================================================================
+    socket.on('call:delivered', async (data) => {
+      try {
+        const { callId, channelName } = data;
+        if (!callId) return;
+
+        const callLog = await CallLog.findById(callId);
+        if (!callLog) return;
+
+        const callerId = callLog.callerId.toString();
+        const callerSockets = connectedUsers.get(callerId);
+        if (callerSockets) {
+          for (const sockId of callerSockets) {
+            io.to(sockId).emit('call:ringing', { callId, channelName });
+          }
+        }
+      } catch (err) {
+        console.error('[Socket] call:delivered error:', err.message);
       }
     });
 
