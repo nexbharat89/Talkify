@@ -54,7 +54,7 @@ const getOrCreateDirectChat = async (req, res, next) => {
     }
 
     const chat = await findOrCreateDirectChat(req.user.userId, peerId);
-    await chat.populate('participants', 'name phone avatarUrl status lastSeen');
+    await chat.populate('participants', 'name phone avatarUrl bio status lastSeen');
 
     const otherParticipant = chat.participants.find(
       (p) => p._id.toString() !== req.user.userId
@@ -69,6 +69,7 @@ const getOrCreateDirectChat = async (req, res, next) => {
             name: otherParticipant.name,
             phone: otherParticipant.phone,
             avatarUrl: otherParticipant.avatarUrl,
+            bio: otherParticipant.bio,
             status: otherParticipant.status,
             lastSeen: otherParticipant.lastSeen,
           }
@@ -94,7 +95,7 @@ const getChats = async (req, res, next) => {
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(parseInt(limit, 10))
-      .populate('participants', 'name phone avatarUrl status lastSeen')
+      .populate('participants', 'name phone avatarUrl bio status lastSeen')
       .populate('lastMessage.messageId')
       .lean();
 
