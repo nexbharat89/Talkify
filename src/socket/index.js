@@ -74,6 +74,11 @@ const initSocketIO = (server) => {
     // offline as 'delivered' and notify their senders (grey double-tick).
     await deliverPendingMessages(io, userId);
 
+    // Catch-up call delivery: re-send any incoming call that was initiated
+    // while this user was offline so the app can confirm delivery via
+    // call:delivered and the caller's UI transitions to "Ringing…".
+    await deliverPendingCalls(io, socket);
+
     // =======================================================================
     // Event: user:status:poll (client requests status of a contact)
     // =======================================================================
@@ -777,6 +782,46 @@ const deliverPendingMessages = async (io, userId) => {
     }
   } catch (err) {
     console.error('[Socket] deliverPendingMessages error:', err.message);
+  }
+};
+
+// ===========================================================================
+// Helper: Re-deliver pending incoming calls to a user who just came online.
+// When the caller initiated a call while this user was offline, the
+// call:incoming was never delivered via socket (only FCM push). Re-sending
+// it now lets the app confirm delivery so the caller sees "Ringing…".
+// ===========================================================================
+const deliverPendingCalls = async (io, socket) => {
+  try {
+    const userId = socket.userId;
+
+    const pendingCalls = await CallLog.find({
+      calleeId: userId,
+      status: 'missed',
+      isGroup: { $ne: true },
+      createdAt: { $gt: new Date(Date.now() - 90 * 1000) },
+    })
+      .populate('callerId', 'name avatarUrl phone')
+      .lean();
+
+    for (const call of pendingCalls) {
+      console.log(`[Socket] Re-delivering pending call ${call._id} to ${userId}`);
+
+      const payload = {
+        callId: call._id,
+        channelName: call.channelName,
+        callType: call.callType || 'audio',
+        caller: {
+          id: call.callerId._id?.toString() || call.callerId.toString(),
+          name: call.callerId.name || '',
+          avatarUrl: call.callerId.avatarUrl || '',
+        },
+      };
+
+      socket.emit('call:incoming', payload);
+    }
+  } catch (err) {
+    console.error('[Socket] deliverPendingCalls error:', err.message);
   }
 };
 
