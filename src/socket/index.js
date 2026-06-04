@@ -795,19 +795,25 @@ const deliverPendingCalls = async (io, socket) => {
   try {
     const userId = socket.userId;
 
-    // Only re-deliver calls that haven't been touched since creation.
-    // call:end or call:response both call save() which bumps updatedAt.
-    // Use MongoDB $expr so the comparison is done server-side, avoiding
-    // any JavaScript Date conversion quirks with .lean() results.
-    const pendingCalls = await CallLog.find({
+    // Only re-deliver calls whose endedAt hasn't been overwritten by call:end
+    // or call:response (the schema default sets it at creation time, so
+    // endedAt ≈ createdAt means the call is still ringing).
+    const allCalls = await CallLog.find({
       calleeId: userId,
       status: 'missed',
       isGroup: { $ne: true },
       createdAt: { $gt: new Date(Date.now() - 90 * 1000) },
-      $expr: { $lte: [{ $subtract: ['$updatedAt', '$createdAt'] }, 2000] },
     })
       .populate('callerId', 'name avatarUrl phone')
       .lean();
+
+    const pendingCalls = allCalls.filter((call) => {
+      const created = new Date(call.createdAt).getTime();
+      const ended = new Date(call.endedAt).getTime();
+      // endedAt was set at creation (default). If call:end or call:response
+      // overwrote it, endedAt will be much later than createdAt.
+      return Math.abs(ended - created) < 5000;
+    });
 
     for (const call of pendingCalls) {
       console.log(`[Socket] Re-delivering pending call ${call._id} to ${userId}`);
