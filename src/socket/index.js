@@ -804,7 +804,15 @@ const deliverPendingCalls = async (io, socket) => {
       .populate('callerId', 'name avatarUrl phone')
       .lean();
 
-    for (const call of pendingCalls) {
+    // Skip calls the caller already ended — those have updatedAt > createdAt
+    // because call:end or call:response modified the document.
+    const stillRinging = pendingCalls.filter((call) => {
+      const created = new Date(call.createdAt).getTime();
+      const updated = new Date(call.updatedAt).getTime();
+      return Math.abs(updated - created) < 2000; // not modified after creation
+    });
+
+    for (const call of stillRinging) {
       console.log(`[Socket] Re-delivering pending call ${call._id} to ${userId}`);
 
       const payload = {
