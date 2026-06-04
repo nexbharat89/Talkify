@@ -13,13 +13,6 @@ const { notifyNewMessage, notifyIncomingCall } = require('../services/pushServic
 const connectedUsers = new Map();
 
 /**
- * Set of channelNames for calls the caller explicitly ended before the callee
- * answered. When deliverPendingCalls runs on callee connect, these are skipped.
- * Entries expires after 2 minutes (longer than the 90s re-delivery window).
- */
-const cancelledCalls = new Set();
-
-/**
  * Map of socketId -> userId for reverse lookup.
  */
 const socketToUser = new Map();
@@ -80,11 +73,6 @@ const initSocketIO = (server) => {
     // Catch-up delivery: mark messages that arrived while this user was
     // offline as 'delivered' and notify their senders (grey double-tick).
     await deliverPendingMessages(io, userId);
-
-    // Catch-up call delivery: re-send any incoming call that was initiated
-    // while this user was offline so the app can confirm delivery via
-    // call:delivered and the caller's UI transitions to "Ringing…".
-    await deliverPendingCalls(io, socket);
 
     // =======================================================================
     // Event: user:status:poll (client requests status of a contact)
@@ -445,6 +433,17 @@ const initSocketIO = (server) => {
           for (const sockId of targetSockets) {
             io.to(sockId).emit('call:incoming', callPayload);
           }
+
+          // Tell the caller the receiver is ringing.
+          const callerSockets = connectedUsers.get(userId);
+          if (callerSockets) {
+            for (const sockId of callerSockets) {
+              io.to(sockId).emit('call:ringing', {
+                callId: callLog._id,
+                channelName,
+              });
+            }
+          }
         }
 
         // Always also send a push so a backgrounded/terminated app shows the
@@ -582,32 +581,6 @@ const initSocketIO = (server) => {
     });
 
     // =======================================================================
-    // Event: call:delivered
-    // Sent by the callee's app when it actually receives an incoming call
-    // notification (via socket). The server relays this as call:ringing to
-    // the caller so their UI can switch from "Calling…" to "Ringing…".
-    // =======================================================================
-    socket.on('call:delivered', async (data) => {
-      try {
-        const { callId, channelName } = data;
-        if (!callId) return;
-
-        const callLog = await CallLog.findById(callId);
-        if (!callLog) return;
-
-        const callerId = callLog.callerId.toString();
-        const callerSockets = connectedUsers.get(callerId);
-        if (callerSockets) {
-          for (const sockId of callerSockets) {
-            io.to(sockId).emit('call:ringing', { callId, channelName });
-          }
-        }
-      } catch (err) {
-        console.error('[Socket] call:delivered error:', err.message);
-      }
-    });
-
-    // =======================================================================
     // Event: call:response
     // =======================================================================
     socket.on('call:response', async (data) => {
@@ -676,13 +649,6 @@ const initSocketIO = (server) => {
         callLog.endedAt = new Date();
         callLog.durationSeconds = durationSeconds;
         await callLog.save();
-
-        // Mark this channel as cancelled so deliverPendingCalls skips it.
-        if (callLog.channelName) {
-          cancelledCalls.add(callLog.channelName);
-          // Auto-expire after 2 minutes (the re-delivery window is 90s).
-          setTimeout(() => cancelledCalls.delete(callLog.channelName), 120000);
-        }
 
         const endedPayload = {
           callId: callLog._id,
@@ -796,62 +762,6 @@ const deliverPendingMessages = async (io, userId) => {
     }
   } catch (err) {
     console.error('[Socket] deliverPendingMessages error:', err.message);
-  }
-};
-
-// ===========================================================================
-// Helper: Re-deliver pending incoming calls to a user who just came online.
-// When the caller initiated a call while this user was offline, the
-// call:incoming was never delivered via socket (only FCM push). Re-sending
-// it now lets the app confirm delivery so the caller sees "Ringing…".
-// ===========================================================================
-const deliverPendingCalls = async (io, socket) => {
-  try {
-    const userId = socket.userId;
-
-    // Find the single most recent pending call for this user.
-    const calls = await CallLog.find({
-      calleeId: userId,
-      status: 'missed',
-      isGroup: { $ne: true },
-      createdAt: { $gt: new Date(Date.now() - 90 * 1000) },
-    })
-      .sort({ createdAt: -1 })
-      .limit(1)
-      .populate('callerId', 'name avatarUrl phone')
-      .lean();
-
-    for (const call of calls) {
-      // Skip if the caller already ended this call (tracked via cancelledCalls).
-      if (cancelledCalls.has(call.channelName)) {
-        console.log(`[Socket] Skipping cancelled call ${call._id}`);
-        continue;
-      }
-
-      // Skip if the caller is no longer connected — their subscription expired.
-      const callerId = call.callerId._id?.toString() || call.callerId.toString();
-      if (!connectedUsers.has(callerId)) {
-        console.log(`[Socket] Skipping call ${call._id} — caller offline`);
-        continue;
-      }
-
-      console.log(`[Socket] Re-delivering pending call ${call._id} to ${userId}`);
-
-      const payload = {
-        callId: call._id,
-        channelName: call.channelName,
-        callType: call.callType || 'audio',
-        caller: {
-          id: call.callerId._id?.toString() || call.callerId.toString(),
-          name: call.callerId.name || '',
-          avatarUrl: call.callerId.avatarUrl || '',
-        },
-      };
-
-      socket.emit('call:incoming', payload);
-    }
-  } catch (err) {
-    console.error('[Socket] deliverPendingCalls error:', err.message);
   }
 };
 
