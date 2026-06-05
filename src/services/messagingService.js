@@ -2,6 +2,8 @@ const Chat = require('../models/Chat');
 const Message = require('../models/Message');
 const User = require('../models/User');
 const { createError } = require('../middleware/errorHandler');
+const { getImageKit } = require('../config/imagekit');
+const path = require('path');
 
 /**
  * Helper: Find or create a 1-on-1 chat between two users.
@@ -357,4 +359,66 @@ const searchMessages = async (req, res, next) => {
   }
 };
 
-module.exports = { getOrCreateDirectChat, getChats, getMessages, createGroup, searchMessages };
+/**
+ * PUT /api/chats/:chatId/group-avatar
+ * Accepts: multipart/form-data
+ * File:   avatar (image file)  — set the group's photo
+ * Field:  removeAvatar=true    — clear the group's photo (when no file sent)
+ *
+ * Any participant of the group may change the photo.
+ */
+const updateGroupAvatar = async (req, res, next) => {
+  try {
+    const { chatId } = req.params;
+    const avatarFile = req.file; // multer memoryStorage
+
+    // Requester must be a participant of this group chat.
+    const chat = await Chat.findOne({
+      _id: chatId,
+      isGroup: true,
+      participants: req.user.userId,
+    });
+    if (!chat) {
+      throw createError(404, 'Group not found or you are not a participant');
+    }
+
+    if (avatarFile) {
+      if (!avatarFile.mimetype || !avatarFile.mimetype.startsWith('image/')) {
+        throw createError(
+          400,
+          `Invalid image type: ${avatarFile.mimetype}. Please upload a valid image file.`
+        );
+      }
+
+      const imagekit = getImageKit();
+      if (!imagekit) {
+        throw createError(503, 'Media service is not configured');
+      }
+
+      const ext = path.extname(avatarFile.originalname) || '.jpg';
+      const uploadResponse = await imagekit.upload({
+        file: avatarFile.buffer,
+        fileName: `group_${chatId}_${Date.now()}${ext}`,
+        folder: '/talkify/group_avatars/',
+        useUniqueFileName: true,
+      });
+
+      chat.groupAvatarUrl = uploadResponse.url;
+    } else if (req.body.removeAvatar === 'true') {
+      chat.groupAvatarUrl = '';
+    } else {
+      throw createError(400, 'No image provided');
+    }
+
+    await chat.save();
+
+    res.status(200).json({
+      message: 'Group photo updated',
+      groupAvatarUrl: chat.groupAvatarUrl,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getOrCreateDirectChat, getChats, getMessages, createGroup, searchMessages, updateGroupAvatar };
