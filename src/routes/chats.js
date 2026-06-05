@@ -2,7 +2,7 @@ const { Router } = require('express');
 const multer = require('multer');
 const path = require('path');
 const authenticate = require('../middleware/auth');
-const { getOrCreateDirectChat, getChats, getMessages, createGroup, searchMessages, updateGroupAvatar } = require('../services/messagingService');
+const { getOrCreateDirectChat, getChats, getMessages, createGroup, searchMessages, updateGroupAvatar, updateGroupName } = require('../services/messagingService');
 
 const router = Router();
 
@@ -38,5 +38,6 @@ router.get('/:chatId/messages', getMessages);
 router.post('/direct', getOrCreateDirectChat);
 router.post('/group', createGroup);
 router.put('/:chatId/group-avatar', upload.single('avatar'), updateGroupAvatar);
+router.put('/:chatId/group-name', updateGroupName);
 
 module.exports = router;

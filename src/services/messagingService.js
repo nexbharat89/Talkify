@@ -421,4 +421,42 @@ const updateGroupAvatar = async (req, res, next) => {
   }
 };
 
-module.exports = { getOrCreateDirectChat, getChats, getMessages, createGroup, searchMessages, updateGroupAvatar };
+/**
+ * PUT /api/chats/:chatId/group-name
+ * Body: { name }
+ * Any participant of the group may rename it.
+ */
+const updateGroupName = async (req, res, next) => {
+  try {
+    const { chatId } = req.params;
+    const name = (req.body.name || '').trim();
+
+    if (!name) {
+      throw createError(400, 'Group name cannot be empty');
+    }
+    if (name.length > 100) {
+      throw createError(400, 'Group name must be 100 characters or fewer');
+    }
+
+    const chat = await Chat.findOne({
+      _id: chatId,
+      isGroup: true,
+      participants: req.user.userId,
+    });
+    if (!chat) {
+      throw createError(404, 'Group not found or you are not a participant');
+    }
+
+    chat.groupName = name;
+    await chat.save();
+
+    res.status(200).json({
+      message: 'Group name updated',
+      groupName: chat.groupName,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getOrCreateDirectChat, getChats, getMessages, createGroup, searchMessages, updateGroupAvatar, updateGroupName };
