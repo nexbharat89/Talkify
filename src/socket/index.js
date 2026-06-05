@@ -5,6 +5,7 @@ const Message = require('../models/Message');
 const Chat = require('../models/Chat');
 const CallLog = require('../models/CallLog');
 const { notifyNewMessage, notifyIncomingCall } = require('../services/pushService');
+const { findOrCreateDirectChat } = require('../services/messagingService');
 
 /**
  * Map of userId -> Set<socketId> for tracking active connections.
@@ -618,6 +619,11 @@ const initSocketIO = (server) => {
         }
         await callLog.save();
 
+        // A rejected call is terminal — log it to the direct chat thread.
+        if (status !== 'accepted') {
+          await logDirectCallToChat(io, callLog);
+        }
+
         // Notify the caller about the response
         const callerId = callLog.callerId.toString();
         const callerSockets = connectedUsers.get(callerId);
@@ -664,6 +670,9 @@ const initSocketIO = (server) => {
         callLog.endedAt = new Date();
         callLog.durationSeconds = durationSeconds;
         await callLog.save();
+
+        // The call has fully ended — write it into the direct chat thread.
+        await logDirectCallToChat(io, callLog);
 
         const endedPayload = {
           callId: callLog._id,
@@ -777,6 +786,90 @@ const deliverPendingMessages = async (io, userId) => {
     }
   } catch (err) {
     console.error('[Socket] deliverPendingMessages error:', err.message);
+  }
+};
+
+// ===========================================================================
+// Helper: Write a finished 1-on-1 call into its direct chat thread as a
+// call-record message, then deliver it live to both participants. Idempotent
+// via callLog.chatMessageId so overlapping terminal events log it only once.
+// ===========================================================================
+const logDirectCallToChat = async (io, callLog) => {
+  try {
+    if (!callLog || callLog.isGroup || !callLog.calleeId) return;
+    if (callLog.chatMessageId) return;
+
+    const callerId = callLog.callerId.toString();
+    const calleeId = callLog.calleeId.toString();
+
+    const chat = await findOrCreateDirectChat(callerId, calleeId);
+
+    const missed = callLog.status === 'missed';
+    const isVideo = callLog.callType === 'video';
+    const noun = isVideo ? 'Video call' : 'Voice call';
+    const content = missed ? `Missed ${noun.toLowerCase()}` : noun;
+
+    const message = await Message.create({
+      chatId: chat._id,
+      senderId: callerId,
+      type: 'call',
+      content,
+      call: {
+        callType: callLog.callType || 'audio',
+        durationSeconds: callLog.durationSeconds || 0,
+        missed,
+        callerId,
+        callId: callLog._id,
+      },
+      status: 'sent',
+      deliveredTo: [],
+      readBy: [],
+    });
+
+    // Guard against a concurrent terminal event also logging this call.
+    callLog.chatMessageId = message._id;
+    await callLog.save();
+
+    // Surface the call as the chat's latest activity.
+    chat.lastMessage = {
+      messageId: message._id,
+      content,
+      type: 'call',
+      senderId: callerId,
+      timestamp: message.createdAt,
+    };
+    await chat.save();
+
+    const messagePayload = {
+      messageId: message._id,
+      chatId: chat._id.toString(),
+      senderId: callerId,
+      type: 'call',
+      content,
+      call: {
+        callType: callLog.callType || 'audio',
+        durationSeconds: callLog.durationSeconds || 0,
+        missed,
+        callerId,
+        callId: callLog._id.toString(),
+      },
+      reactions: [],
+      timestamp: message.createdAt,
+    };
+
+    // Deliver to both parties (including the caller) so each side's open chat
+    // updates live, plus a chat-list refresh signal.
+    for (const partyId of [callerId, calleeId]) {
+      const sockets = connectedUsers.get(partyId);
+      if (sockets) {
+        for (const sockId of sockets) {
+          io.to(sockId).emit('message:receive', messagePayload);
+          io.to(sockId).emit('chat:updated', { chatId: chat._id.toString() });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Socket] logDirectCallToChat error:', err.message);
   }
 };
 

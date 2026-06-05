@@ -189,6 +189,7 @@ const getMessages = async (req, res, next) => {
         type: msg.type,
         content: msg.content,
         media: msg.media || null,
+        call: msg.call || null,
         replyTo: msg.replyTo || null,
         forwardedFrom: msg.forwardedFrom || null,
         reactions: (msg.reactions || []).map((r) => ({
@@ -459,4 +460,4 @@ const updateGroupName = async (req, res, next) => {
   }
 };
 
-module.exports = { getOrCreateDirectChat, getChats, getMessages, createGroup, searchMessages, updateGroupAvatar, updateGroupName };
+module.exports = { getOrCreateDirectChat, getChats, getMessages, createGroup, searchMessages, updateGroupAvatar, updateGroupName, findOrCreateDirectChat };

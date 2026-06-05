@@ -55,6 +55,14 @@ const callLogSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    // Set once this call has been written into its direct chat thread as a
+    // call-record message. Acts as an idempotency guard so overlapping
+    // terminal events (reject + end) log the call only once.
+    chatMessageId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Message',
+      default: null,
+    },
   },
   {
     timestamps: true,

@@ -15,13 +15,21 @@ const messageSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['text', 'image', 'audio', 'video', 'file'],
+      enum: ['text', 'image', 'audio', 'video', 'file', 'call'],
       default: 'text',
     },
     content: {
       type: String,
       required: true,
       maxlength: 5000,
+    },
+    // For call-record messages: a 1-on-1 call logged into the chat thread.
+    call: {
+      callType: { type: String, enum: ['audio', 'video'], default: 'audio' },
+      durationSeconds: { type: Number, default: 0 },
+      missed: { type: Boolean, default: false },
+      callerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      callId: { type: mongoose.Schema.Types.ObjectId, ref: 'CallLog', default: null },
     },
     // For media messages: ImageKit URLs and metadata
     media: {
