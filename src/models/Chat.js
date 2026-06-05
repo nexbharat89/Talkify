@@ -31,7 +31,7 @@ const chatSchema = new mongoose.Schema(
     lastMessage: {
       messageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
       content: { type: String, default: '' },
-      type: { type: String, enum: ['text', 'image', 'audio', 'video', 'file'], default: 'text' },
+      type: { type: String, enum: ['text', 'image', 'audio', 'video', 'file', 'call', 'system'], default: 'text' },
       senderId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
       timestamp: { type: Date },
     },

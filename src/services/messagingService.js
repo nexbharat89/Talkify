@@ -33,6 +33,60 @@ const findOrCreateDirectChat = async (userId1, userId2) => {
 };
 
 /**
+ * Create a system message for a group event (name/icon change), mark it as the
+ * chat's last activity, and deliver it live to every participant. The client
+ * renders "You..." vs "<actorName>..." based on actorId.
+ */
+const postGroupSystemMessage = async (chat, { actorId, actorName, event, oldValue, newValue, content }) => {
+  const message = await Message.create({
+    chatId: chat._id,
+    senderId: actorId,
+    type: 'system',
+    content,
+    system: {
+      event,
+      actorId,
+      actorName: actorName || '',
+      oldValue: oldValue || '',
+      newValue: newValue || '',
+    },
+    status: 'sent',
+    deliveredTo: [],
+    readBy: [],
+  });
+
+  chat.lastMessage = {
+    messageId: message._id,
+    content,
+    type: 'system',
+    senderId: actorId,
+    timestamp: message.createdAt,
+  };
+  await chat.save();
+
+  // Lazy require to avoid a require cycle (socket requires this module).
+  const { emitToUsers } = require('../socket');
+  const payload = {
+    messageId: message._id,
+    chatId: chat._id.toString(),
+    senderId: actorId,
+    type: 'system',
+    content,
+    system: {
+      event,
+      actorId,
+      actorName: actorName || '',
+      oldValue: oldValue || '',
+      newValue: newValue || '',
+    },
+    reactions: [],
+    timestamp: message.createdAt,
+  };
+  emitToUsers(chat.participants, 'message:receive', payload);
+  emitToUsers(chat.participants, 'chat:updated', { chatId: chat._id.toString() });
+};
+
+/**
  * POST /api/chats/direct
  * Find or create a 1-on-1 chat between the authenticated user and a peer.
  */
@@ -190,6 +244,7 @@ const getMessages = async (req, res, next) => {
         content: msg.content,
         media: msg.media || null,
         call: msg.call || null,
+        system: msg.system || null,
         replyTo: msg.replyTo || null,
         forwardedFrom: msg.forwardedFrom || null,
         reactions: (msg.reactions || []).map((r) => ({
@@ -383,6 +438,7 @@ const updateGroupAvatar = async (req, res, next) => {
       throw createError(404, 'Group not found or you are not a participant');
     }
 
+    let removed = false;
     if (avatarFile) {
       if (!avatarFile.mimetype || !avatarFile.mimetype.startsWith('image/')) {
         throw createError(
@@ -407,11 +463,28 @@ const updateGroupAvatar = async (req, res, next) => {
       chat.groupAvatarUrl = uploadResponse.url;
     } else if (req.body.removeAvatar === 'true') {
       chat.groupAvatarUrl = '';
+      removed = true;
     } else {
       throw createError(400, 'No image provided');
     }
 
     await chat.save();
+
+    // Announce the change in the group thread (best-effort).
+    try {
+      const actor = await User.findById(req.user.userId).select('name').lean();
+      const actorName = actor?.name || 'Someone';
+      await postGroupSystemMessage(chat, {
+        actorId: req.user.userId,
+        actorName,
+        event: 'group_avatar',
+        content: removed
+          ? `${actorName} removed the group icon`
+          : `${actorName} changed the group icon`,
+      });
+    } catch (e) {
+      console.error('[Group] system message (avatar) failed:', e.message);
+    }
 
     res.status(200).json({
       message: 'Group photo updated',
@@ -448,8 +521,30 @@ const updateGroupName = async (req, res, next) => {
       throw createError(404, 'Group not found or you are not a participant');
     }
 
+    const oldName = chat.groupName || '';
     chat.groupName = name;
     await chat.save();
+
+    // Announce the rename in the group thread (best-effort). Skip if unchanged.
+    if (oldName !== name) {
+      try {
+        const actor = await User.findById(req.user.userId).select('name').lean();
+        const actorName = actor?.name || 'Someone';
+        const content = oldName
+          ? `${actorName} changed the group name from "${oldName}" to "${name}"`
+          : `${actorName} changed the group name to "${name}"`;
+        await postGroupSystemMessage(chat, {
+          actorId: req.user.userId,
+          actorName,
+          event: 'group_name',
+          oldValue: oldName,
+          newValue: name,
+          content,
+        });
+      } catch (e) {
+        console.error('[Group] system message (name) failed:', e.message);
+      }
+    }
 
     res.status(200).json({
       message: 'Group name updated',

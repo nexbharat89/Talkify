@@ -15,13 +15,22 @@ const messageSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['text', 'image', 'audio', 'video', 'file', 'call'],
+      enum: ['text', 'image', 'audio', 'video', 'file', 'call', 'system'],
       default: 'text',
     },
     content: {
       type: String,
       required: true,
       maxlength: 5000,
+    },
+    // For system messages: a group event (name/icon change) shown inline in
+    // the thread. The client builds "You..." vs "<name>..." from actorId.
+    system: {
+      event: { type: String, default: null }, // 'group_name' | 'group_avatar'
+      actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      actorName: { type: String, default: null },
+      oldValue: { type: String, default: null },
+      newValue: { type: String, default: null },
     },
     // For call-record messages: a 1-on-1 call logged into the chat thread.
     call: {

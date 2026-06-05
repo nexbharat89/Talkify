@@ -19,6 +19,12 @@ const connectedUsers = new Map();
 const socketToUser = new Map();
 
 /**
+ * The live Socket.io server instance, set on init. Lets non-socket code
+ * (REST route handlers) emit events to connected users.
+ */
+let ioRef = null;
+
+/**
  * Initialize Socket.io on the HTTP server.
  */
 const initSocketIO = (server) => {
@@ -30,6 +36,9 @@ const initSocketIO = (server) => {
     pingTimeout: 60000,
     pingInterval: 25000,
   });
+
+  // Expose io so REST handlers (e.g. group updates) can push socket events.
+  ioRef = io;
 
   // =========================================================================
   // Authentication Middleware
@@ -911,4 +920,20 @@ const broadcastStatus = async (io, userId, status) => {
   }
 };
 
-module.exports = { initSocketIO, isUserOnline, connectedUsers };
+// ===========================================================================
+// Helper: Emit an event to every socket of the given users. Used by REST
+// route handlers (which don't hold the io instance) to push live updates.
+// ===========================================================================
+const emitToUsers = (userIds, event, payload) => {
+  if (!ioRef) return;
+  for (const uid of userIds) {
+    const sockets = connectedUsers.get(uid.toString());
+    if (sockets) {
+      for (const sockId of sockets) {
+        ioRef.to(sockId).emit(event, payload);
+      }
+    }
+  }
+};
+
+module.exports = { initSocketIO, isUserOnline, connectedUsers, emitToUsers };
