@@ -60,9 +60,12 @@ const callLogSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Null until the call actually ends. (Previously defaulted to Date.now,
+    // which made every call look "already ended" the instant it was created —
+    // that silently broke group-call end detection and chat logging.)
     endedAt: {
       type: Date,
-      default: Date.now,
+      default: null,
     },
     // Set once this call has been written into its direct chat thread as a
     // call-record message. Acts as an idempotency guard so overlapping
