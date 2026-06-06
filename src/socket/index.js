@@ -502,11 +502,24 @@ const initSocketIO = (server) => {
           chatId,
           isGroup: true,
           participants: [userId],
+          attendees: [userId],
           channelName,
           callType,
           status: 'outgoing',
           startedAt: new Date(),
         });
+
+        // Hand the initiator the callId so their own join/leave is recorded
+        // (the GroupCallScreen is pushed before the call:incoming round-trip).
+        const initiatorSocketsAck = connectedUsers.get(userId);
+        if (initiatorSocketsAck) {
+          for (const sockId of initiatorSocketsAck) {
+            io.to(sockId).emit('call:group:initiated', {
+              callId: callLog._id,
+              channelName,
+            });
+          }
+        }
 
         const callPayload = {
           callId: callLog._id,
@@ -578,8 +591,9 @@ const initSocketIO = (server) => {
       try {
         const { callId } = data;
         if (!callId) return;
+        // Add to the active set AND the permanent attendee list.
         await CallLog.findByIdAndUpdate(callId, {
-          $addToSet: { participants: userId },
+          $addToSet: { participants: userId, attendees: userId },
         });
       } catch (err) {
         console.error('[Socket] call:group:join error:', err.message);
@@ -591,15 +605,21 @@ const initSocketIO = (server) => {
         const { callId } = data;
         if (!callId) return;
         const callLog = await CallLog.findById(callId);
-        if (!callLog) return;
+        if (!callLog || callLog.endedAt) return;
+
         callLog.participants = callLog.participants.filter(
           (p) => p.toString() !== userId
         );
-        // When the last participant leaves, close the call out.
-        if (callLog.participants.length === 0 && !callLog.endedAt) {
-          callLog.endedAt = new Date();
+
+        // A group call is only meaningful with 2+ people. Once a leave drops
+        // the active set to one (or zero) the call is over for everyone — end
+        // it and tear down the lone remaining participant too. With 3+ people
+        // a single leave just shrinks the call and it continues.
+        if (callLog.participants.length <= 1) {
+          await endGroupCall(io, callLog);
+        } else {
+          await callLog.save();
         }
-        await callLog.save();
       } catch (err) {
         console.error('[Socket] call:group:leave error:', err.message);
       }
@@ -879,6 +899,131 @@ const logDirectCallToChat = async (io, callLog) => {
     }
   } catch (err) {
     console.error('[Socket] logDirectCallToChat error:', err.message);
+  }
+};
+
+// ===========================================================================
+// Helper: Finalize a group call. Stamps endedAt/duration, logs it into the
+// group chat thread, and notifies every group member so active call screens
+// tear down and any lingering incoming-call ring is dismissed. Idempotent —
+// a call that already carries endedAt is left untouched.
+// ===========================================================================
+const endGroupCall = async (io, callLog) => {
+  try {
+    if (!callLog || !callLog.isGroup) return;
+    if (callLog.endedAt) return;
+
+    callLog.endedAt = new Date();
+    if (callLog.startedAt) {
+      callLog.durationSeconds = Math.max(
+        0,
+        Math.round((callLog.endedAt - callLog.startedAt) / 1000)
+      );
+    }
+    await callLog.save();
+
+    // Write the finished call into the group chat thread.
+    await logGroupCallToChat(io, callLog);
+
+    // Notify every group member: tear down GroupCallScreen / dismiss any
+    // still-ringing incoming-call UI on members who never answered.
+    const chat = await Chat.findById(callLog.chatId).select('participants').lean();
+    const memberIds = chat ? chat.participants.map((p) => p.toString()) : [];
+    const endedPayload = {
+      callId: callLog._id,
+      channelName: callLog.channelName,
+      durationSeconds: callLog.durationSeconds || 0,
+      isGroup: true,
+    };
+    for (const memberId of memberIds) {
+      const sockets = connectedUsers.get(memberId);
+      if (sockets) {
+        for (const sockId of sockets) {
+          io.to(sockId).emit('call:ended', endedPayload);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Socket] endGroupCall error:', err.message);
+  }
+};
+
+// ===========================================================================
+// Helper: Write a finished group call into its group chat thread as a
+// call-record message and deliver it live to every member. Idempotent via
+// callLog.chatMessageId.
+// ===========================================================================
+const logGroupCallToChat = async (io, callLog) => {
+  try {
+    if (!callLog || !callLog.isGroup || !callLog.chatId) return;
+    if (callLog.chatMessageId) return;
+
+    const chat = await Chat.findById(callLog.chatId);
+    if (!chat) return;
+
+    const callerId = callLog.callerId.toString();
+    const isVideo = callLog.callType === 'video';
+    const noun = isVideo ? 'Group video call' : 'Group voice call';
+
+    const message = await Message.create({
+      chatId: chat._id,
+      senderId: callerId,
+      type: 'call',
+      content: noun,
+      call: {
+        callType: callLog.callType || 'audio',
+        durationSeconds: callLog.durationSeconds || 0,
+        missed: false,
+        callerId,
+        callId: callLog._id,
+      },
+      status: 'sent',
+      deliveredTo: [],
+      readBy: [],
+    });
+
+    // Guard against a concurrent terminal event logging this call twice.
+    callLog.chatMessageId = message._id;
+    await callLog.save();
+
+    chat.lastMessage = {
+      messageId: message._id,
+      content: noun,
+      type: 'call',
+      senderId: callerId,
+      timestamp: message.createdAt,
+    };
+    await chat.save();
+
+    const messagePayload = {
+      messageId: message._id,
+      chatId: chat._id.toString(),
+      senderId: callerId,
+      type: 'call',
+      content: noun,
+      call: {
+        callType: callLog.callType || 'audio',
+        durationSeconds: callLog.durationSeconds || 0,
+        missed: false,
+        callerId,
+        callId: callLog._id.toString(),
+      },
+      reactions: [],
+      timestamp: message.createdAt,
+    };
+
+    for (const participant of chat.participants) {
+      const memberId = participant.toString();
+      const sockets = connectedUsers.get(memberId);
+      if (sockets) {
+        for (const sockId of sockets) {
+          io.to(sockId).emit('message:receive', messagePayload);
+          io.to(sockId).emit('chat:updated', { chatId: chat._id.toString() });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Socket] logGroupCallToChat error:', err.message);
   }
 };
 

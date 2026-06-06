@@ -22,8 +22,17 @@ const callLogSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    // Participants invited to / joined in a group call.
+    // Currently-active participants in a group call. Members are added on
+    // join and REMOVED on leave — used to detect when the call should end.
     participants: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+      },
+    ],
+    // Everyone who ever joined the group call (append-only — never removed on
+    // leave). This is what the call history shows as "who attended".
+    attendees: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
