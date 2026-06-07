@@ -19,6 +19,16 @@ const connectedUsers = new Map();
 const socketToUser = new Map();
 
 /**
+ * Map of callId -> Map<userId, { agoraUid, name, avatarUrl }> for group calls.
+ * Members join Agora with uid=0 (Agora auto-assigns a random numeric uid), so
+ * the client cannot map a remote Agora uid back to an account on its own. Each
+ * member announces its assigned uid via `call:group:presence`; we keep the
+ * uid→identity mapping here and broadcast it as `call:group:roster` so every
+ * tile can show the member's real name and avatar.
+ */
+const callRosters = new Map();
+
+/**
  * The live Socket.io server instance, set on init. Lets non-socket code
  * (REST route handlers) emit events to connected users.
  */
@@ -619,9 +629,47 @@ const initSocketIO = (server) => {
           await endGroupCall(io, callLog);
         } else {
           await callLog.save();
+          // Drop the leaver from the roster and refresh everyone still in.
+          const roster = callRosters.get(callId);
+          if (roster && roster.delete(userId)) {
+            await broadcastRoster(io, callId);
+          }
         }
       } catch (err) {
         console.error('[Socket] call:group:leave error:', err.message);
+      }
+    });
+
+    // =======================================================================
+    // Event: call:group:presence (announce this member's Agora uid)
+    // =======================================================================
+    // The client reports the numeric uid Agora assigned it on join. We record
+    // uid→identity for the call and broadcast the full roster so every member
+    // can label remote tiles with the real name/avatar instead of the raw uid.
+    socket.on('call:group:presence', async (data) => {
+      try {
+        const { callId, agoraUid } = data;
+        if (!callId || agoraUid === undefined || agoraUid === null) return;
+
+        const user = await User.findById(userId)
+          .select('name avatarUrl')
+          .lean();
+        if (!user) return;
+
+        let roster = callRosters.get(callId);
+        if (!roster) {
+          roster = new Map();
+          callRosters.set(callId, roster);
+        }
+        roster.set(userId, {
+          agoraUid: Number(agoraUid),
+          name: user.name || '',
+          avatarUrl: user.avatarUrl || '',
+        });
+
+        await broadcastRoster(io, callId);
+      } catch (err) {
+        console.error('[Socket] call:group:presence error:', err.message);
       }
     });
 
@@ -925,6 +973,9 @@ const endGroupCall = async (io, callLog) => {
     // Write the finished call into the group chat thread.
     await logGroupCallToChat(io, callLog);
 
+    // Drop the in-memory roster for this finished call.
+    callRosters.delete(callLog._id.toString());
+
     // Notify every group member: tear down GroupCallScreen / dismiss any
     // still-ringing incoming-call UI on members who never answered.
     const chat = await Chat.findById(callLog.chatId).select('participants').lean();
@@ -1024,6 +1075,34 @@ const logGroupCallToChat = async (io, callLog) => {
     }
   } catch (err) {
     console.error('[Socket] logGroupCallToChat error:', err.message);
+  }
+};
+
+// ===========================================================================
+// Helper: Broadcast the current uid→identity roster for a group call to every
+// member who has announced presence. Each member uses it to label remote tiles
+// with the real name/avatar instead of the raw Agora uid.
+// ===========================================================================
+const broadcastRoster = async (io, callId) => {
+  const roster = callRosters.get(callId);
+  if (!roster) return;
+
+  const members = Array.from(roster.entries()).map(([uid, info]) => ({
+    userId: uid,
+    agoraUid: info.agoraUid,
+    name: info.name,
+    avatarUrl: info.avatarUrl,
+  }));
+
+  const payload = { callId, members };
+
+  for (const memberId of roster.keys()) {
+    const sockets = connectedUsers.get(memberId);
+    if (sockets) {
+      for (const sockId of sockets) {
+        io.to(sockId).emit('call:group:roster', payload);
+      }
+    }
   }
 };
 
