@@ -33,7 +33,7 @@ const config = {
     user: process.env.SMTP_USER || '',
     // Gmail App Passwords are displayed with spaces — strip them so auth works.
     pass: (process.env.SMTP_PASS || '').replace(/\s+/g, ''),
-    fromName: process.env.SMTP_FROM_NAME || 'Talkify',
+    fromName: process.env.SMTP_FROM_NAME || 'Mittal',
     otpExpiryMinutes: 5,
   },
 

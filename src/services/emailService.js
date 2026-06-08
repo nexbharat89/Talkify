@@ -39,7 +39,7 @@ const sendOtpEmail = async (toEmail, otp) => {
 
   const html = `
     <div style="font-family: Arial, Helvetica, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; color: #1a1a1a;">
-      <h2 style="margin: 0 0 8px;">Your Talkify verification code</h2>
+      <h2 style="margin: 0 0 8px;">Your ${config.smtp.fromName} verification code</h2>
       <p style="margin: 0 0 24px; color: #555;">Use the code below to sign in. It expires in ${config.smtp.otpExpiryMinutes} minutes.</p>
       <div style="font-size: 36px; font-weight: 700; letter-spacing: 10px; text-align: center; background: #f1f5f3; border-radius: 12px; padding: 20px 0; color: #16a34a;">
         ${otp}
@@ -52,8 +52,8 @@ const sendOtpEmail = async (toEmail, otp) => {
     await getTransporter().sendMail({
       from,
       to: toEmail,
-      subject: `${otp} is your Talkify verification code`,
-      text: `Your Talkify verification code is ${otp}. It expires in ${config.smtp.otpExpiryMinutes} minutes.`,
+      subject: `${otp} is your ${config.smtp.fromName} verification code`,
+      text: `Your ${config.smtp.fromName} verification code is ${otp}. It expires in ${config.smtp.otpExpiryMinutes} minutes.`,
       html,
     });
     console.log(`[Email OTP] Sent OTP email to ${toEmail}`);
