@@ -49,12 +49,12 @@ const generateTokens = (user) => {
 
 /**
  * POST /api/auth/send-otp
- * Body: { phone, email }
+ * Body: { phone, email, name }
  * Generates an OTP and delivers it to the user's email via SMTP.
  */
 const sendOtp = async (req, res, next) => {
   try {
-    const { phone, email } = req.body;
+    const { phone, email, name } = req.body;
 
     if (!phone || !/^\+\d{10,15}$/.test(phone)) {
       throw createError(400, 'Valid phone number with country code is required (e.g. +919876543210)');
@@ -65,15 +65,21 @@ const sendOtp = async (req, res, next) => {
       throw createError(400, 'A valid email address is required');
     }
 
+    const normalizedName = (name || '').trim();
+    if (!normalizedName || normalizedName.length < 2) {
+      throw createError(400, 'A valid name is required');
+    }
+
     // Find or create user placeholder (not fully registered until OTP verified)
     let user = await User.findOne({ phone, isDeleted: false });
     if (!user) {
       user = new User({ phone });
     }
     user.email = normalizedEmail;
+    user.name = normalizedName;
 
     const { otp, otpHash } = generateOtp();
-    await sendOtpEmail(normalizedEmail, otp);
+    await sendOtpEmail(normalizedEmail, otp, normalizedName);
 
     // Store OTP hash with expiry
     user.otpHash = otpHash;

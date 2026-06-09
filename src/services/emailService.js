@@ -32,14 +32,20 @@ const getTransporter = () => {
 
 /**
  * Send a 6-digit OTP to the given email address.
+ * [name] is used to personalize the greeting (optional).
  * Throws a 502 if the message cannot be delivered.
  */
-const sendOtpEmail = async (toEmail, otp) => {
+const sendOtpEmail = async (toEmail, otp, name) => {
   const from = `"${config.smtp.fromName}" <${config.smtp.user}>`;
+
+  const safeName = (name || '').trim();
+  const greeting = safeName ? `Hi ${safeName},` : 'Hi,';
+  const textGreeting = safeName ? `Hi ${safeName}, ` : '';
 
   const html = `
     <div style="font-family: Arial, Helvetica, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; color: #1a1a1a;">
       <h2 style="margin: 0 0 8px;">Your ${config.smtp.fromName} verification code</h2>
+      <p style="margin: 0 0 16px; color: #1a1a1a; font-weight: 600;">${greeting}</p>
       <p style="margin: 0 0 24px; color: #555;">Use the code below to sign in. It expires in ${config.smtp.otpExpiryMinutes} minutes.</p>
       <div style="font-size: 36px; font-weight: 700; letter-spacing: 10px; text-align: center; background: #f1f5f3; border-radius: 12px; padding: 20px 0; color: #16a34a;">
         ${otp}
@@ -53,7 +59,7 @@ const sendOtpEmail = async (toEmail, otp) => {
       from,
       to: toEmail,
       subject: `${otp} is your ${config.smtp.fromName} verification code`,
-      text: `Your ${config.smtp.fromName} verification code is ${otp}. It expires in ${config.smtp.otpExpiryMinutes} minutes.`,
+      text: `${textGreeting}Your ${config.smtp.fromName} verification code is ${otp}. It expires in ${config.smtp.otpExpiryMinutes} minutes.`,
       html,
     });
     console.log(`[Email OTP] Sent OTP email to ${toEmail}`);
