@@ -479,6 +479,10 @@ const initSocketIO = (server) => {
             callType,
           }
         );
+
+        // Safety net: if neither accept nor reject reaches us within the ring
+        // window, end the call so the caller stops ringing.
+        scheduleRingTimeout(callLog._id);
       } catch (err) {
         console.error('[Socket] call:initiate error:', err.message);
         socket.emit('call:error', { error: 'Failed to initiate call' });
@@ -686,6 +690,9 @@ const initSocketIO = (server) => {
           return;
         }
 
+        // The call has been answered/declined in-app — cancel the ring timeout.
+        clearRingTimeout(callLog._id);
+
         if (status === 'accepted') {
           callLog.status = callLog.calleeId.toString() === userId ? 'incoming' : 'outgoing';
           callLog.startedAt = new Date();
@@ -740,6 +747,8 @@ const initSocketIO = (server) => {
           socket.emit('call:error', { error: 'Call not found' });
           return;
         }
+
+        clearRingTimeout(callLog._id);
 
         // Stamp the end time. We deliberately do NOT touch `status`: an
         // outgoing call that was never accepted stays 'missed', so the callee
@@ -1160,4 +1169,115 @@ const emitToUsers = (userIds, event, payload) => {
   }
 };
 
-module.exports = { initSocketIO, isUserOnline, connectedUsers, emitToUsers };
+// ===========================================================================
+// Ring timeout — server-side safety net for 1:1 calls. The callee's native
+// incoming-call UI rings for ~45s; if no accept/reject reaches us by then
+// (e.g. the callee declined from a killed app and the signal was lost, or the
+// callee went offline), we end the call ourselves so the caller stops ringing.
+// ===========================================================================
+// Slightly longer than the client ring window (~45s) so this only fires when
+// the callee never interacted — explicit declines are cut immediately via the
+// reject path, and a real answer near the end of the ring isn't pre-empted.
+const RING_TIMEOUT_MS = 50000;
+const ringTimeouts = new Map(); // callId(string) -> Timeout
+
+const clearRingTimeout = (callId) => {
+  if (!callId) return;
+  const key = callId.toString();
+  const handle = ringTimeouts.get(key);
+  if (handle) {
+    clearTimeout(handle);
+    ringTimeouts.delete(key);
+  }
+};
+
+const scheduleRingTimeout = (callId) => {
+  if (!callId) return;
+  const key = callId.toString();
+  clearRingTimeout(key);
+  const handle = setTimeout(() => {
+    ringTimeouts.delete(key);
+    endUnansweredCall(key).catch((err) =>
+      console.error('[Socket] ring timeout error:', err.message)
+    );
+  }, RING_TIMEOUT_MS);
+  // Don't keep the event loop alive just for a pending ring timeout.
+  if (typeof handle.unref === 'function') handle.unref();
+  ringTimeouts.set(key, handle);
+};
+
+// End a 1:1 call that was never answered. Idempotent: a no-op if the call has
+// already been accepted or ended.
+const endUnansweredCall = async (callId) => {
+  const callLog = await CallLog.findById(callId);
+  if (!callLog || callLog.isGroup) return;
+  // Already accepted or already ended — nothing to do.
+  if (callLog.endedAt || callLog.status !== 'missed') return;
+
+  callLog.endedAt = new Date();
+  callLog.durationSeconds = 0;
+  await callLog.save();
+
+  await logDirectCallToChat(ioRef, callLog);
+
+  const parties = [
+    callLog.callerId,
+    callLog.calleeId ? callLog.calleeId : null,
+  ].filter(Boolean);
+  // The caller's ringing screen tears down on call:response:ack (not call:ended).
+  emitToUsers([callLog.callerId], 'call:response:ack', {
+    callId: callLog._id,
+    channelName: callLog.channelName,
+    status: 'missed',
+  });
+  emitToUsers(parties, 'call:ended', {
+    callId: callLog._id,
+    channelName: callLog.channelName,
+    durationSeconds: 0,
+  });
+};
+
+// Reject a 1:1 call on behalf of [byUserId] (the callee). Used by the REST
+// endpoint so a decline from a terminated app still cuts the call. Idempotent.
+// Returns { ok, reason }.
+const rejectCall = async (callId, byUserId) => {
+  const callLog = await CallLog.findById(callId);
+  if (!callLog) return { ok: false, reason: 'not_found' };
+  if (callLog.isGroup) return { ok: false, reason: 'group' };
+  // Only the callee may reject their own incoming call.
+  if (!callLog.calleeId || callLog.calleeId.toString() !== byUserId.toString()) {
+    return { ok: false, reason: 'forbidden' };
+  }
+
+  clearRingTimeout(callLog._id);
+
+  // Only mutate/log the first time a terminal event lands.
+  if (!callLog.endedAt && callLog.status === 'missed') {
+    callLog.endedAt = new Date();
+    callLog.durationSeconds = 0;
+    await callLog.save();
+    await logDirectCallToChat(ioRef, callLog);
+  }
+
+  const parties = [callLog.callerId, callLog.calleeId].filter(Boolean);
+  emitToUsers(parties, 'call:response:ack', {
+    callId: callLog._id,
+    channelName: callLog.channelName,
+    status: 'rejected',
+  });
+  emitToUsers(parties, 'call:ended', {
+    callId: callLog._id,
+    channelName: callLog.channelName,
+    durationSeconds: 0,
+  });
+
+  return { ok: true };
+};
+
+module.exports = {
+  initSocketIO,
+  isUserOnline,
+  connectedUsers,
+  emitToUsers,
+  rejectCall,
+};

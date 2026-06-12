@@ -1,6 +1,7 @@
 const CallLog = require('../models/CallLog');
 const Chat = require('../models/Chat');
 const { createError } = require('../middleware/errorHandler');
+const { rejectCall } = require('../socket');
 
 /**
  * GET /api/calls/history
@@ -98,4 +99,32 @@ const getCallHistory = async (req, res, next) => {
   }
 };
 
-module.exports = { getCallHistory };
+/**
+ * POST /api/calls/:callId/reject
+ * Reject an incoming 1:1 call. Exists as an HTTP path (in addition to the
+ * `call:response` socket event) so a decline from a terminated app — which has
+ * no live socket — still reaches the server and cuts the call for the caller.
+ * Idempotent: rejecting an already-ended call is a no-op.
+ */
+const rejectCallController = async (req, res, next) => {
+  try {
+    const { callId } = req.params;
+    const userId = req.user.userId;
+
+    const result = await rejectCall(callId, userId);
+    if (!result.ok) {
+      if (result.reason === 'not_found') {
+        return res.status(404).json({ error: 'Call not found' });
+      }
+      if (result.reason === 'forbidden' || result.reason === 'group') {
+        return res.status(403).json({ error: 'Not allowed to reject this call' });
+      }
+      return res.status(400).json({ error: 'Could not reject call' });
+    }
+    return res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getCallHistory, rejectCallController };

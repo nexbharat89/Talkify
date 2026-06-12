@@ -1,7 +1,7 @@
 const { Router } = require('express');
 const authenticate = require('../middleware/auth');
 const { generateAgoraToken } = require('../services/agoraService');
-const { getCallHistory } = require('../services/callService');
+const { getCallHistory, rejectCallController } = require('../services/callService');
 const { testPush } = require('../services/pushService');
 
 const router = Router();
@@ -12,5 +12,6 @@ router.use(authenticate);
 router.post('/agora-token', generateAgoraToken);
 router.get('/history', getCallHistory);
 router.post('/test-push', testPush);
+router.post('/:callId/reject', rejectCallController);
 
 module.exports = router;
